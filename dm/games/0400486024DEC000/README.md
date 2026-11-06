@@ -4,11 +4,11 @@ The Switch 2 base dump reaches its title screen on the Mac. VideoToolbox decodes
 
 ## Profile
 
-SDK 22.2.8, NVN API 231.40, with Nintendo's sead, agl and gsys. The three loaded modules are `main`, `subsdk0` (NintendoSDK_movie), and `sdk`. The NPDM declares 48 MiB of system resources. Startup requests a 6.20 GiB heap, which fits in the profile's 12 GiB reservation with the stack and alias regions. The registered build is the supplied base dump (`v0`).
+SDK 22.2.8, NVN API 231.40, with Nintendo's sead, agl and gsys. The three loaded modules are `main`, `subsdk0` (NintendoSDK_movie), and `sdk`. The NPDM declares 48 MiB of system resources. Startup requests a 6.20 GiB heap, which fits in the profile's 12 GiB reservation with the stack and alias regions. The profile registers update `v131072`. Its original `v0` label was corrected after direct NUP header inspection. The base package has different module IDs and has not been validated here.
 
 ## Mac dry run
 
-Use the rewritten `patched_v0` and the original extracted `base/romfs`. Build the host with `make -C dm/host GAME=0400486024DEC000` and use the [Mac shader build](../../../docs/development.md#build-by-hand-mac). From the repository, set `DUMP` to the folder containing `base` and `WORK` to the build and run workspace beside it.
+Use the rewritten `patched_v131072` and the extracted update RomFS. Build the host with `make -C dm/host GAME=0400486024DEC000` and use the [Mac shader build](../../../docs/development.md#build-by-hand-mac). From the repository, set `DUMP` to the folder containing `base` and `WORK` to the build and run workspace beside it.
 
 ```sh
 mkdir -p "$WORK/run/save" "$WORK/run/temp" "$WORK/font"
@@ -17,7 +17,7 @@ DM_ROOT="$WORK" DM_ROMFS="$DUMP/base/romfs" DM_SAVE="$WORK/run/save" \
   DM_TEMP="$WORK/run/temp" DM_MSL_DIR="$WORK/shader/cache" DM_FONT_DIR="$WORK/font" \
   DM_NVN_SHMAP="$PWD/dm/games/0400486024DEC000/shader_map.tsv" \
   DM_WINDOW=1 DM_METAL_HUD=1 DM_FOCUS_KEEP=1 DM_AUDIO=1 \
-  dm/host/dmhost "$WORK/patched_v0"
+  dm/host/dmhost "$WORK/patched_v131072"
 ```
 
 `DM_FOCUS_KEEP=1` lets the title keep playing while another app has focus. The profile prewarms the 11 NDVE compute pipelines used by the title. On the Apple M5 that took 17.7 s on a cold run, with a progress screen, and 7 ms with the archive warm. Compiling the same pipelines during the first submission had blocked the first movie frame for tens of seconds. The larger scene shader set also triggers a separate graphics-pipeline prebuild. On the first run with that set, the startup screen took 86.9 s to hand out all pairs, and the remaining workers finished after 110.6 s total.
@@ -58,7 +58,7 @@ The integrated NDSR reader uses #1388's wordwise walk while retaining both sets 
 
 ### M3 Pro baseline
 
-Test environment: M3 Pro, 36 GiB unified memory, macOS 27.2 (26B123), 2560×1440 window. Update v131072 was packaged with a derived profile; its three NSO build IDs match the registered base code. The baseline source was #1299 head `ee9b7765d579c46e45a7297493565e098f3bda33`, plus the duplicate audio-registration removal.
+Test environment: M3 Pro, 36 GiB unified memory, macOS 27.2 (26B123), 2560×1440 window. Update v131072 was packaged with a derived profile; its three NSO build IDs match the profile originally labeled `v0`. Direct inspection confirms the base main is `33fa6c2c23848282a77e8b88a0a93f48`, while update main is `e0f3ccfaf50065ae4ea01eb5aeb13b1a`; the base subsdk0/sdk IDs are also different. The baseline source was #1299 head `ee9b7765d579c46e45a7297493565e098f3bda33`, plus the duplicate audio-registration removal.
 
 Scripted input exercised Link's house, a door transition, the ladder, Kokiri Forest movement and camera, equipment/items/system menus, manual save, a clean process exit, relaunch and loading that manual save. The resumed outdoor scene accepted movement and opened Saria's conversation. No abort was seen in these bounded runs. Physical-controller input, audible sound quality, combat, later areas and extended outdoor stability were not verified.
 
