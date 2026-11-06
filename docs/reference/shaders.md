@@ -489,8 +489,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `draw skipped: no render pipeline (vertex - fragment -)` in a game's final passes; shaders "not in the shader map", all from `agl_ndsr.pck`.
 - **Cause:** the pack's records start at +0x10 in one SDK's version and +0x14 in another's, by the words in its header (Donkey Kong Bananza 0x300, 0x6efeff, 0xc0000; [Splatoon Raiders](../../dm/games/0400380020056000/README.md) 0x40100, 0x80300, 0x90, 0x20c00).
-- **Fix:** `ndsr_shaders` in `shader_split.py` takes the start at which more of the first 16 records point at an NVN2 control section.
-- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+- **Fix:** `ndsr_shaders` in `shader_split.py` took the start at which more of the first 16 records pointed at an NVN2 control section. It now walks the table one 4-byte word at a time from +0x10: a word that points at an NVN2 control section and is followed by a control-typed length (type 0, 3 or 6, at least 0x48 bytes) starts a shader's pair of pairs, any other word moves on by one. Both header sizes read the same as before, and so does a pack whose constant-data pairs sit between the shaders' pairs: The Legend of Zelda: Ocarina of Time's (Switch 2, SDK 22.2.8) `agl_ndsr_vr.pck` has one such pair after each shader, so every other control pair started in the middle of a record and the record walk read 21 of its 24 shaders. `test_split_ndsr_pairs.py` builds packs of both shapes.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md); The Legend of Zelda: Ocarina of Time (its profile is in pull request #1299).
 
 ### The movie library's NDVE shader pack
 
@@ -499,6 +499,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ndve_shaders` in `shader_split.py` reads both: sections by their magic, and the table word by word for records that point at an NVN2 section whose +0x44 matches the code length. Each section runs up to its code area and has the NVN2 layout (stage +0x56, thread group +0x58), all compute. The prefilter lets `NDVE` files through. A profile names the folder in `shader_groups` (`/Movie/=movie`).
 - **Check:** `dm/gfx/tests/test_ndve.py`: raw and table-named programs, the key without the offset word, a file that is not a pack, and `scan_blob`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 22 programs, 11 of them used by the title movie (AV1 1920×1080). With them the title screen shows its movie behind the logo and menu.
+
+### Programs on odd entries of an NDSR pack
+
+- **Symptom:** `[RED] shader … is not in the shader map` and `the dispatched program has no compute shader` once, just before the first `upscaler: output` line, and hard stair-stepped edges on foliage: the upscaler's SMAA has no blend weights. The key is in no archive by the split's reckoning.
+- **Cause:** an NDSR pack is a list of 8-byte entries, `{offset, length << 4 | type}`: a control section (0, 3, 6) followed by its code area (1, 4, 7), and constant data. `ndsr_shaders` walked two entries at a time, which holds while every run of data has an even count. In the variable-ratio packs a 4-byte entry (type 9) sits between two programs and the next program falls on an odd entry.
+- **Fix:** `ndsr_shaders` walks single entries and takes the entry after a control section as its code area.
+- **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, PR #1299): `d17eefaff4f0bc23` (both variable-ratio packs), `1fdc85178b60f6ce` (`agl_ndsr_vr_light.pck`) and `92918e9b7e2f89a4` (`agl_ndsr_vr.pck`); the split finds 3 more shaders. [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md)'s `agl_ndsr.pck` gives the same 30 keys.
+- **Check:** `dm/tools/tests/test_split_ndsr_entries.py`.
 
 ## Control sections and code
 
@@ -622,9 +630,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Dead-code removal dropped the inputs of atomics
 
-- **Cause:** Ryujinx's `Optimizer.RemoveNode` removes a dead node, then follows each source whose last use went away into the node that produced it. It did so even when that producer has side effects, such as an atomic or a call whose result is unused. Such a producer stays in the block, but its sources lost their uses, so the next dead-code pass deleted the chain that feeds it, and the atomic read undefined values.
-- **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
-- **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
+- **Symptom:** a translated image load can use uninitialized coordinates after one result is discarded and another remains in use.
+- **Cause:** when `Optimizer.RemoveNode` removes the last use of a result, it may follow that result back into its producer and detach the producer's input uses. This is valid only if the producer can also be removed. A live sibling result keeps the producer in the block, where it still reads those inputs. The same applies to an atomic or a call with side effects.
+- **Fix:** use the existing `IsUnused` check for the producer before following it. It checks every destination and retains the side-effect protection added by MacNativeGames' translator patch 0002.
+- **Found on:** Ocarina of Time's two foliage simulation compute shaders with uninitialized coordinates in translated SPIR-V. The earlier atomic case did not change the translated output of 94,717 shaders from Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet and ANIMAL WELL.
+- **Check:** `SurfaceLoadLiveness` in `dm/gfx/tests/test_dmsh_ampere_mem.py` uses synthetic instructions to exercise partial and complete image-load elimination and an atomic with an unused result.
 
 ### Position invariance across shaders
 
@@ -725,11 +735,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:**
   - `shader_split.py` names the stages `ts` and `ms`, as `task` and `mesh` in the shader map.
   - `dmsh_build.py` translates one as compute, its SPH taken off, with its stage memory in shared memory at the offsets `dmsh_meshstage.memory` gives (job `stage_memory`, `AIsberd` and `AStageOut` in `InstEmitAmpereMem.cs`). A byte store goes through the shared memory's byte store, a compare-and-swap on its word, as neighbouring threads write neighbouring bytes.
+  - ISBERD with the payload store's own mode (0xb8) reads back a payload word the task wrote, at the same offset in the outputs.
   - On the console a workgroup of 32 threads is one warp, so the zero count each thread writes first cannot pass the count one thread writes later. Metal's threads run in no such step, and a late zero would erase the count: that store is left out, and the wrapper starts the stage memory at zero.
   - `dmsh_meshstage.to_stage` wraps the kernel as a Metal `[[object]]` or `[[mesh]]` function: it fills the inputs, calls the kernel's body (whose early returns come back to it) and hands the outputs over. A mesh shader has `main0` and `main0_z` for the two depth conventions, as a vertex shader does.
   - The host keeps these stages in the tessellation stages' places, 3 and 4 (`hle_nvn.c` `st_host`, `nvn_mtl.m` `gfx_stage_bits`): a program has mesh shaders or tessellation, never both. `nvn_geometry.inc` `mesh_tasks_draw` draws through `draw_` with the pixel stage alone, on a mesh pipeline built in the background; the mesh stage shares the vertex stage's argument table, as a geometry mesh draw does, and a task shader has the object stage's. Their storage buffer tables in `c0` are at 0x670 and 0x770: [Task and mesh draws reading the dummy buffer](#task-and-mesh-draws-reading-the-dummy-buffer).
 - **Not done:** `DrawMeshTasks3D` and the indirect and multi-draw forms have no game yet to show their arguments, so they stay red. A task or mesh shader with shared memory of its own (LDS, STS, ATOMS) is refused at build time: it would lie over the stage memory and the control section does not give its size. No game's does.
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 7 task and 18 mesh shaders, which draw its bushes and grass. All 11 pipelines its first race makes build, and the race holds 60 fps with them. The facts of pull request #983 were checked against the game's code and hold, except its storage buffer table offsets.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 7 task and 18 mesh shaders, which draw its bushes and grass. All 11 pipelines its first race makes build, and the race holds 60 fps with them. The facts of pull request #983 were checked against the game's code and hold, except its storage buffer table offsets. The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): its agl task shader `5d3a096025e375a1` stores a payload word at +0x10 and reads it back (ISBERD mode 0xb8), which stopped the shader as an unknown mode before.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_meshstage.py` (the stages compile for macOS and iOS where the Metal compiler is installed), `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`StageMemory`).
 
 ### Task and mesh shaders in NVN2 BNSH program slots 7 and 8
@@ -1120,6 +1131,31 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### F2IP: two floats into two bytes
+
+- **Symptom:** `Ampere instruction 243 at 0x… is not implemented`, or `F2IP other than .U8.F32.NTZ of two registers with RZ`, in the shader build; the compute or mesh shader is left out and its dispatches or draws skipped.
+- **Cause:** sm_86's F2IP (9-bit opcode 0x043, register form 0x243) converts two floats to integers and packs them; the decoder had no entry for it. Its fields are F2I's: unsigned (72 clear), 8 bits (75..77 clear), the rounding mode in 78..79 (nearest even, floor, ceiling, truncation), and bit 74 set in every one met. The first form translated, F2IP.U8.F32.NTZ Rd, a, b, RZ to the nearest, refused the other one met: a = RZ with truncation (78..79 = 3, the hi word's `c4ff`).
+- **Fix:** `AF2ip` in `InstEmitAmpereAlu.cs`: each source rounded by the instruction's mode, saturated to 0..255 and NaN to 0, b in byte 0 and a in byte 1, the upper half zero; a = RZ leaves b alone in byte 0. The colour converters join two results into four bytes with PRMT 0x5410 and store them, and the bytes come out in pixel order only with b low; the mesh shaders shift a single result by 16 or 24 into an RGBA8 word, which also puts b in byte 0. Any other encoding (another form, C not RZ, other bits from 72 on) stops the shader.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): 28 F2IPs to the nearest in 10 compute shaders that convert a picture into BT.709 Y and CbCr bytes (`99951da6e5cd38f5`, `aaa785ced92a88ef` and eight larger ones), and 14 truncating ones of a colour channel times 255 in 8 foliage mesh shaders (`740e2b04db624fb1` and seven others, `Foliage.Product.110`). With both, 42,850 of its 42,851 shaders translate; the one left (`68bbe98b3bfd9876`, agl_common) has data in place of code, as in [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`F2ip`: the game's encoding on live registers, the byte order and the encodings refused; `F2ipTruncate`: the mesh shaders' encoding and the other rounding modes; `UimadImmediateC`: UIMAD with its immediate in C, another of the game's forms).
+
+### ATOMG.CAS: a global compare-and-swap
+
+- **Symptom:** `Ampere instruction 3a9 at 0x… is not implemented` in the shader build; the compute shader is left out and its dispatches skipped.
+- **Cause:** sm_86's ATOMG.CAS (register form 0x3a9; the decoder had the uniform form 0x9a9 only as a store) had no emitter. Its fields: Rd the old word, Ra the address (a pair with bit 72), Rb the value compared, Rc (64..72) the value written where the word equals Rb, the size at 73..76 (0 = 32 bits), the predicate at 81..84 that takes whether it swapped (PT where met).
+- **Fix:** `AAtomgCas` in `InstEmitAmpereMem.cs`: a 32-bit global compare-and-swap whose old word goes to Rd and whose comparison goes to the predicate; the global-to-storage pass turns it into a storage buffer one (or a raw pool table one). Other sizes and the uniform form stop the shader.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six compute shaders of `FoliageShader.sharcb` (`13002657609092b4` and five others) claim a hash slot with `CAS(slot, 0, index + 1)` and take the old value's index when the slot was taken (0x8c00 in `13002657609092b4`). All six translate now.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`AtomgCas`).
+
+### Blocks nested past clang's bracket depth
+
+- **Symptom:** `fatal error: bracket nesting level exceeded maximum of 256` from the Metal compile in the shader build; the shader is left out.
+- **Cause:** the translator's structurizer opens a block for every forward branch to a common exit, so a guest loop that the game's compiler unrolled with an early exit after each step nests one block a step. Ocarina of Time's agl_technique_pfx compute shaders walk a 256-element array, each step taking `min(left, a[i])` from it and leaving once nothing is left: 257 levels, past clang's default of 256.
+- **Fix:** a source nested past the limit compiles with `-fbracket-depth=1024` (`ios_metal.metal_command`, used by `dmsh_build.py` `mac_compile` and `ios_metal.compile`). The build counts the deepest nesting of `(`, `[` and `{` together in the MSL (2 ms a shader), which is at least clang's count of any one kind. Only such a source gets the flag: it only raises the limit, so the output is what the plain compile would give, and the compile records, which key every shader's Metal compile cache, stay as they were. Turning the flag on for every compile had changed those records and sent all 42,851 of Ocarina of Time's shaders past that cache. Its other shaders nest 35 deep at most. Both shaders compile on the Mac and for iOS (2.4 s and 0.6 s).
+- **Open:** the nesting itself. A structurizer that leaves such a chain through one exit (a `break` out of a single loop) would not nest, and would not depend on the limit; it changes every shader's control flow, so it waits for a regression run across games.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): `1f78730053feb036` and `e172bd7ec218ab8e` (`agl_technique_pfx.sharcb`).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_bracket_depth.py` (only a source past the limit gets the flag, the records do not name it, a 300-deep walk compiles with both commands and fails without the flag).
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).
@@ -1128,6 +1164,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Limit:** only the comparisons. The compilers set .FTZ on nearly every float instruction of every shader, so it is in effect a mode of the whole shader, and Metal has none (`MTLCompileOptions` has math modes, no denormal control). Flushing the arithmetic would be about 3.3 million more sites in Mario Kart World, so its FADD, FMUL and FFMA keep denormals. Four denormal weights can still add up to a normal sum, which NVIDIA sees as zero; it stays finite, so it makes no NaN.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
+
+### Float add atomics
+
+- **Symptom:** `Invalid reduction type: F32FtzRn` in the shader build's translator notes. In the game, a value that shaders sum on the GPU stays 0: Ocarina of Time's outdoor scenes washed out to near white, with fog over everything and a huge glare at a doorway, while interiors looked right.
+- **Cause:** `EmitAtomicOp` handled integer sizes only and logged any other, dropping the instruction: RED and ATOMG `.ADD.F32.FTZ.RN` left no trace in the shader. The IR has no float atomic.
+- **Fix:** general: `EmitAtomicAddF32` in `InstEmitMemory.cs` adds through a compare-and-swap loop of the word, flushing denormals as `.FTZ` does. `GlobalToStorage` lowers the load and the exchange as any others, to a storage buffer or through the pool table.
+- **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, PR #1299): 416 instructions in 34 shaders. 12 are agl's analysis compute shaders (`sky_analyze`, `probe_analyze`, `cube_map_probe_analyze`, `shadow_analyze`, `inner_mask_analyze`, `local_depth_shadow_analyze`), dispatched every frame outdoors; the other 22 are `pick_final_color` and `var3` of two material shaders. Only those 12 rebuilt on the old app brought the colours back at one spot; not confirmed in a full build.
+- **Check:** `RedF32` in `dm/gfx/tests/test_dmsh_ampere_mem.py`, on the game's encoding.
 
 ### Barrier moves around warp shuffles
 
@@ -1191,6 +1235,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): its 24 NDSR compute shaders. On one save and route, the upscaler took 1.1-1.6 ms a frame instead of 0.1-5.1 ms (2.5-4.5 typically), a frame's GPU span 8.9-19.4 ms instead of 13.8-23.3, and the game's 60 ↔ 30 switches fell from 87 to 68 in the same run length; the picture is unchanged.
 - **Note:** three of four of these HMMAs start an output tile, with C = 0. A variant for those calls that neither stores nor loads C (`simdgroup_multiply` first) was measured and not kept: 0.767 against 0.820 ns a warp-HMMA (6 %) in an isolated loop of the build's two bodies on an M4 Pro, about 0.04 ms of the upscaler's 1.6-1.9 ms a frame, and no measurable change in the game.
 - **Open:** LDSM and MOVM (27 and 72 a shader) are still emulated with shuffles (314 left in the upscaler, whose floor without them is about 0.3 ms); loading A and B straight from LDSM's source and keeping D as matrices between HMMAs (0.65 ns an HMMA) needs the translator to follow LDSM → MOVM → HMMA → HMMA chains.
+
+### LDSM reads rows other lanes stored
+
+- **Symptom:** a Switch 2 movie or network output has dotted streaks: every other pixel of a few hundred rows wrong, mostly green and magenta, in other places each run, while its source is clean. Ocarina of Time's title movie after its NDVE filter (texture 6231, before agl's upscaler).
+- **Cause:** a warp stores tiles to shared memory (STS) and reads them back with LDSM, with no BAR between them. The Switch runs a warp's shared-memory accesses in order. Metal orders another lane's threadgroup store and this lane's load only through a barrier, and its compiler moved them past each other. The wrong pixels are mostly at odd x, the high halves of packed pairs.
+- **Fix:** `InstEmitAmpereTensor.ALdsm` puts a subgroup barrier (`Instruction.SubgroupBarrier`, `simdgroup_barrier(mem_flags::mem_threadgroup)`) before its loads and another after them, so that no lane's next store reaches the rows before every lane has read them. LDSM is warp-collective, so the whole SIMD-group reaches both. A SIMD-group-scope fence after each store, with no execution barrier, left about 3,800 such pixels a frame.
+- **Check:** `test_dmsh_ampere_mem.py` `Shared.test_ldsm_reads_between_subgroup_barriers`. In the game, pixels of 6231 that differ from both vertical neighbours while those agree: 6,700-14,000 a frame before, 71-86 after (the YUV source: 40-58). The GPU time is unchanged.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in #1299): the movie library's NDVE shaders, five of which (`ba079f68ae288dba`, `a8b4fb48fee0ccf8`, `e6be82d835fbe4d3`, `7f7ff0f36b54d90f`, `5a7d69b067a7f011`) have no BAR between their STS and LDSM.
 
 ### Driver-segment reads outside fragment shaders
 

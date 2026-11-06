@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x3a9, InstName.Atom, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -130,15 +131,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset]
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
+                // 0xb8 (the payload store's mode, 0x927): a word of the payload this task writes, read back. The Legend of Zelda: Ocarina of Time's agl task shader
+                // 5d3a096025e375a1 stores a word at payload + 0x10 (+0x70) and reads it at +0x80
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const((mode == 0xb8 ? stage[2] : stage[1]) + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -345,6 +348,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 context.Store(storageKind, lo, hi, value);
             }
+        }
+
+        // ATOMG.CAS Rd, [Ra + offset], Rb, Rc (0x3a9): the old word to Rd, the new one Rc (64..72) where the word equals Rb, Ra a pair with bit 72, size 73..76, and whether it swapped to the predicate
+        // at 81..84 (PT here). Ocarina of Time's foliage compute shaders (FoliageShader.sharcb) claim a hash slot with it, CAS(slot, 0, index + 1), and take the old value's index when it was taken
+        public static void AAtomgCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            AtomSize size = (AtomSize)x.Bits(73, 76);
+
+            if (size is not (AtomSize.U32 or AtomSize.S32))
+            {
+                throw AFail(context, $"ATOMG.CAS size {size}");
+            }
+
+            if (x.Bit(91))
+            {
+                throw AFail(context, "ATOMG.CAS in the uniform form");
+            }
+
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 72, 64, 0);
+            Operand expected = context.Copy(x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr));
+            Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
+            Operand old = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, expected, value);
+
+            ASetPred(context, x.Bits(81, 84), context.ICompareEqual(old, expected));
+            ASet(context, x, old);
         }
 
         // RED [Ra + UR + offset], Rb: type 73..76, operation 87..90

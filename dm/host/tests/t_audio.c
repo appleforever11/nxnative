@@ -3,6 +3,8 @@
 #include "../hle_audio.c"
 #include <time.h>
 #include <sys/mman.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static struct { const void *k; void *v; } om[8];
@@ -95,7 +97,31 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// Inspect the actual registrations linked from hle_audio.c: duplicate names abort
+// the host before nnMain even when both implementations return the same value.
+static int test_audio_takeovers(void) {
+    unsigned long bytes = 0;
+    const hle_force_ent *entries = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    if (!entries || bytes % sizeof(*entries)) { puts("FAIL audio takeover section"); return 1; }
+    const hle_force_ent *virtual_input = NULL;
+    for (size_t i = 0; i < bytes / sizeof(*entries); i++) {
+        for (size_t j = 0; j < i; j++) if (!strcmp(entries[i].name, entries[j].name)) {
+            printf("FAIL duplicate audio takeover: %s\n", entries[i].name); return 1;
+        }
+        if (!strcmp(entries[i].name, "_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi")) virtual_input = &entries[i];
+    }
+    if (!virtual_input) { puts("FAIL missing virtual audio input takeover"); return 1; }
+    unsigned char names[128], expected[128]; memset(names, 0xa5, sizeof names); memcpy(expected, names, sizeof names);
+    int (*list)(void *, int) = (int (*)(void *, int))virtual_input->fn;
+    if (list(names, 1) || memcmp(names, expected, sizeof names) || list(NULL, 0)) {
+        puts("FAIL virtual audio input list must be empty and leave the buffer untouched"); return 1;
+    }
+    puts("audio takeovers: unique registrations, virtual input list empty without writing names");
+    return 0;
+}
+
 int main(void) {
+    if (test_audio_takeovers()) return 1;
     if (test_surround_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);

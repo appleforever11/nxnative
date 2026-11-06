@@ -169,7 +169,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Cause:** in SDK 20 the getters the host used (`GetExecutionMode`, `GetRenderingDevice`, `GetCommandBufferWorkBufferSize`) are inlined away, `GenerateCommand` takes and returns a `Span<std::byte>` (the generated list comes back in x0 / x1), the device and mode are words at +0x48 / +0x4c, the command buffer is at +0xf8 / +0x100, and `UpdateImpl` locks the mutex at +0x2d0 instead of +0x1f0. The DeviceSink command became ID 0x14 (SDK 20 inserted a command before it) with the same layout.
 - **Fix:** `render_once` picks the layout by whether the Span version of `GenerateCommand` exists (`hle_audren.c`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md).
-- **Note:** the render thread's call takes another route in this SDK too: see [The render thread's route through the public `ExecuteAudioRendererRendering` (SDK 20)](#the-render-threads-route-through-the-public-executeaudiorendererrendering-sdk-20); the update lock at +0x2d0 is in [The renderer's update lock (`update_lock`)](#the-renderers-update-lock-update_lock).
+- **Note:** the render thread's call takes another route in this SDK too: see [The render thread's route through the public `ExecuteAudioRendererRendering` (SDK 20)](#the-render-threads-route-through-the-public-executeaudiorendererrendering-sdk-20); the update lock at +0x2d0 is in [The renderer's update lock (`update_lock`)](#the-renderers-update-lock-update_lock), and SDK 22 moved it ([The update lock read off `UpdateImpl` (SDK 22)](#the-update-lock-read-off-updateimpl-sdk-22)).
+
+### The update lock read off `UpdateImpl` (SDK 22)
+
+- **Symptom:** `CRASH sig=11 addr=0x20` at `nn::audio::server::AddressInfo::GetReference` (`sdk+0x249874`) on the render thread, under `CommandGenerator::GenerateDataSourceCommand` and `render_once`, minutes into a movie. The `AddressInfo` the crash register points at is all zeros, though the function had just read a non-null memory pool pointer from it.
+- **Cause:** the Span layout took the lock at a fixed +0x2d0. SDK 22.2.8's `UpdateImpl` (`sdk+0x238530`) locks the `SdkMutexType` at +0x2d8 (`add x19, x0, #0x2d8; …; mov x0, x19; bl SdkMutexType::Lock`). Locked at +0x2d0, the render excluded nothing and wrote a lock word into the field before the mutex. The game's `RequestUpdate` then rewrote a voice while its commands were being generated. `Update` itself reads the system tick first and calls `UpdateImpl`, so `update_lock` found no lock there.
+- **Fix:** for the Span layout `update_lock` reads the offset off `UpdateImpl` (`hle_audren.c`) and keeps +0x2d0 only when it finds no `SdkMutexType::Lock`. The start-up line names it: `update lock SdkMutexType at +0x2d8`.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072; its profile is in pull request #1299): the second run through its opening movie crashed; the run after the fix played the opening through and Kokiri Forest ran with sound.
 
 ### SDK 21 DSP command header without a magic
 
@@ -310,6 +317,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Symptom:** at boot, `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` in the sdk (`nn::audio::detail::ListVirtualInputDevices`).
 - **Cause:** SDK 22's virtual input devices (the Switch 2's microphone routing) are listed through the `auddmg:u` service, which the SDK's own client connects to ([services the game connects to itself](../../dm/host/hle_sf.c)). `nn::audio::ListVirtualInputDevices` had no hook, so the SDK's code ran and aborted on the refused connection.
 - **Fix:** `hle_audio.c` answers `ListVirtualInputDevices` with no devices, as `ListAudioIns` ([above](#no-audio-input-devices)): the host has no microphone.
+- **Integration check:** keep only one `ListVirtualInputDevices` registration. The rebased Ocarina branch contained both `h_ai_ListVirtual` and `h_is_List`, which answered the same zero-device result but aborted the loader as duplicate forced takeovers before `nnMain`. `t_audio` checks the linked audio registration section for unique names and verifies the empty virtual-input result without writing the names buffer.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), which lists them at boot.
 
 ### `OpenAudioOut` without a release event (SDK 22)

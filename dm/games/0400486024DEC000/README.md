@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time
 
-The Switch 2 base dump reaches its title screen on the Mac. VideoToolbox decodes the 1920×1080 AV1 track. The movie library runs its NDVE compute shaders to produce the background behind the logo and menu. Gameplay validation is open.
+The Switch 2 base dump reaches its title screen on the Mac. VideoToolbox decodes the 1920×1080 AV1 track. The movie library runs its NDVE compute shaders to produce the background behind the logo and menu. The baseline has also been exercised through movement, menus, a manual save and a process restart on an M3 Pro; see the dated test below. Wider gameplay validation remains open.
 
 ## Profile
 
@@ -45,3 +45,27 @@ For a run past the opening, copy the committed save folder to the new run's `DM_
 - The opening scene calls `nvnCommandBufferDrawMeshTasksIndirect`, which the host does not implement. On `v0` the probe caught the return at `main+0x2be2dc0`; the branch builds the command buffer pointer in `x0` and the indirect argument address in `x1`. It does not set `x2` on that path. A separate sample of the first 64 bytes at the indirect address returned zeros after the call; the populated record's layout is still unverified. The title-only run logged 11 keys missing from the map. The expanded run captured seven of them before the memory failure. A byte-for-byte comparison found none of those seven code areas in the extracted shader package.
 - The 3D scene's CPU cost (37–59 ms a frame, with pool walks of about 33,000 descriptors) is [resolved](../../../docs/reference/frame-rate.md#a-bindless-pool-table-rebuilt-for-every-registration). Open: the GPU's 14–21 ms a frame in Kokiri Forest, which still drops frames below 60 fps; TBDR optimizations are off for this bindless game (`DM_NVN_TBDR=1` turns them on), and attachments load and store about 330 MB a frame.
 - The Nov. 4 Lichii branches offer two shader leads. Its [packed conversion lowering](https://github.com/zortos293/Lichii/commit/35c043b3efaa147d1c1afe8a52cdf19fa92b77bf) handles opcode `0x243` with source A set to `RZ` and mode `0x0000c4ff`; both of this game's failed foliage programs use two registers and mode `0x000004ff`, which needs independent verification. Its [floating-point global reduction](https://github.com/zortos293/Lichii/commit/3aa89d1cdbe58a2bd5ded06b9c615c78da2ade70) matches a separate `F32FtzRn` diagnostic in the Mac shader build, where the translator drops that operation. Neither of the two shaders in the sky lookup and draw uses those instructions or the gather opcodes from Lichii's [fog work](https://github.com/zortos293/Lichii/commit/375c4a472bd95fdfaae0de6e3f192499cd14f806).
+
+## Community integration experiment (2026-11-05)
+
+The exact commits and integration decisions are recorded in [integration sources](integration-sources.md).
+
+This branch combines community work discussed in [#1299](https://github.com/seedds/nxnative/pull/1299). It is an integration experiment: a comparison of the combined build cannot attribute an improvement to an individual change. Historical M5 measurements above remain the original author's observations, not measurements of this branch on an M3 Pro.
+
+The source includes #1300 (packed conversion and ISBERD), #1304 (graphics tier), #1305 (display layer), #1308 (sRGB image views), #1312 (mesh indirect draws and image atomics), #1332/#1382 (GPU failure diagnostics), #1343 (multi-destination liveness), #1345 (audio update locking), #1350 (GPU timestamps), #1353/#1388 (NDSR entries), #1359 (floating-point atomics), #1360 (adaptive global-memory lookup), #1373 (heap-region helper), #1376 (LDSM barriers), #1390 (GPU-write range tracking), #1393 (retired texture descriptors), and #1420 (NvPkg unwrap). The related storage-retirement, pool-buffer reuse, bracket-depth and working-set guard changes are included as well. These are credited upstream contributions, not newly authored fixes in this branch.
+
+The integrated NDSR reader uses #1388's wordwise walk while retaining both sets of regression tests. The retired-descriptor check runs in the common lookup before the fast path, retaining pool-buffer reuse and diagnostics. The duplicate forced virtual-input registration is removed; a regression test inspects the actual registration section and checks the remaining no-device handler.
+
+### M3 Pro baseline
+
+Test environment: M3 Pro, 36 GiB unified memory, macOS 27.2 (26B123), 2560×1440 window. Update v131072 was packaged with a derived profile; its three NSO build IDs match the registered base code. The baseline source was #1299 head `ee9b7765d579c46e45a7297493565e098f3bda33`, plus the duplicate audio-registration removal.
+
+Scripted input exercised Link's house, a door transition, the ladder, Kokiri Forest movement and camera, equipment/items/system menus, manual save, a clean process exit, relaunch and loading that manual save. The resumed outdoor scene accepted movement and opened Saria's conversation. No abort was seen in these bounded runs. Physical-controller input, audible sound quality, combat, later areas and extended outdoor stability were not verified.
+
+The visible window showed overexposure and missing terrain/geometry. The user-confirmed Metal HUD sample was 22.15 FPS, 43.20 ms GPU and 45.14 ms frame interval. A separate warm outdoor 300-frame log window had frame median 48.45 ms, p95 59.58 ms and GPU median 47.39 ms. Peak sampled process/GPU memory was 19,439/14,207 MiB in the first run and 15,338/10,101 MiB after restart. These are samples, not guarantees or exhaustive peaks. Black padding in internal capture images was absent from the actual window and is not a player-visible rendering defect.
+
+### Combined-build validation
+
+Translator fixtures: 252 tests passed, two skipped. Static/profile/documentation checks: 77 passed. Host tests and the complete graphics fixture run passed on the M3 Pro. These validate mechanisms, not game compatibility.
+
+The trial Mac bundle omits the offline GPU archive, so pipeline preparation occurs on the device. A private Mac configuration tests an 8 GiB alias region and serial encoding (`DM_NVN_ENC_THREAD=0`); these are experimental conditions, not universal profile defaults. Combined-build gameplay and performance comparison are pending. Shader compilation counts, warm-frame timings, terrain visibility and memory growth must be recorded from that build before claiming an improvement.

@@ -154,6 +154,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** any `NVN_RB_TEXU` declared 2D takes the row form for a buffer texture. Rows of a finalized object are kept by what they view (`g_tb2_gone`: buffer, offset, length, format), emptied with the pools.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 13.1 million views made for 13.2 million binds became 1.08 million, with frame times unchanged at 16.7 ms.
 
+### sRGB textures loaded and stored raw through an image
+
+- **Symptom:** the whole picture pale and washed out, its blacks lifted to grey (a frame's median luminance 0.46 against 0.16 in console footage, its darkest percent 0.18 against 0.01): bloom reads as a haze over everything and the dither of fine detail (Star Fox's fur) as grain. A pass dump shows a compute shader writing an `RGBA8_SRGB` texture (Metal format 71) through an image.
+- **Cause:** NVN's image loads and stores convert no sRGB, as OpenGL's image units do not (no sRGB format is an image format there), so a shader that stores an sRGB-encoded value into an sRGB texture's image leaves those bytes as they are; sampling decodes them later. Metal decodes a read and encodes a write through an sRGB format, and the host bound the texture's own Metal format to the image slot, so each stored value was encoded a second time. Star Fox relies on it: after DLSS (MetalFX here) its copy pass encodes the linear result itself (`35ebccc529cc58a9`, flag 0x80) into its `RGBA8_SRGB` target, so that the upscaler network (`ddc729bcdb4c8df9`), which samples that target, gets encoded colour, and the network stores its encoded output into the `RGBA8_SRGB` image it fills (768x432 → 1536x864). Measured on one frame: MetalFX's output equals the decoded input (identity), the stored bytes are the twice-encoded output, and the displayed picture decoded once matches the console footage's percentiles within 0.02.
+- **Fix:** `img_binding` / `img_fit` (`nvn_mtl.m`), for every game: an image slot holding an sRGB texture gets a view of its linear twin (`pf_srgb_linear`, the `g_pfv_srgb` pairs, which Metal views without the format-view usage), so loads and stores go raw; the sampled descriptor keeps the sRGB format. Log line `sRGB texture bound as an image`. The MetalFX stand-in for a game's upscaler ([A game's own upscaler drawn by MetalFX](#a-games-own-upscaler-drawn-by-metalfx)) takes its output through the same binding; no game seen gives it an sRGB image (Donkey Kong Bananza's is R11G11B10F).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_image_srgb` (Metal validation): RGBA8_SRGB and BGRA8_SRGB textures; the image view is the linear twin over the same writable storage, an image load returns the stored byte (0x80 → 0.502), a sampled read decodes it (0.216), and an image store of 0.5 keeps 0x80 (0xbc before).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (update 131072), measured on a build of our fork: every frame after its DLSS pass; with it fixed, General Pepper's close-up in the intro matches console footage (luminance percentiles 1 / 50 / 90 / 99: 0.024 / 0.174 / 0.529 / 0.851 against 0.012 / 0.158 / 0.513 / 0.861), where before it was 0.175 / 0.456 / 0.747 / 0.933. Its bloom chain (separate textures 384x216 to 12x6, additive upsampling as the game sets it, 1/30 in the composite) and MetalFX's DLSS stand-in were measured unchanged by this.
+
 ### Buffer textures read by 1D integer fetches (row wrap)
 
 - **Symptom:** `texture type mismatch: shader declares 2, texture is 9`; the slot read 0.
@@ -558,6 +566,20 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `snap_take` commits the residency set after resolving the source (`res_commit`, free when nothing changed), for every game.
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) 1.0.4 on an iPad mini 7 (A17 Pro), which presents three times before its first submission ([GitHub issue #626](https://github.com/seedds/nxnative/issues/626)). The reporter's Apple M4 test did not fault without the fix.
 - **Not checked:** the iPad with the fix.
+
+### A GPU whose access macOS revoked stops the game
+
+- **Symptom:** after a GPU hang or GPU page faults, every upload, segment, submission and display command buffer comes back `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` ("Ignored (for causing prior/excessive GPU errors)"). Nothing is drawn again while the game's sound and logic go on, until the game aborts itself (`game called nn::diag abort`, about 70 s later); in full screen, WindowServer froze for 40 s and its watchdog killed it. With the fix the log has `[RED] GPU access revoked: the … command buffer was ignored`, and a Mac app shows an alert and quits.
+- **Cause:** macOS revokes a process's GPU access after GPU errors it caused, and from then on runs none of its command buffers: they come back at once with `MTL4CommandQueueErrorAccessRevoked`. The host logged them and went on. Their feedback still came, but the GPU no longer signalled the shared event a game's SyncWait waits on (for up to an hour, `mtl_wait_at`), and each present took a drawable that no command buffer drew. Metal 4 reports a commit's error as `MTL4CommandQueueErrorTimeout` with no text, with the command buffer's own error under `NSUnderlyingErrorKey` and `NSMultipleUnderlyingErrorsKey`, so the top-level code alone never shows it.
+- **Fix:** `gpu_lost_check` (`nvn_mtl.m`) looks for `MTL4CommandQueueErrorAccessRevoked` in each command buffer's error and the errors under it; the first one stops the game, for every game:
+  - presents stop (`present_now`);
+  - the shared event is raised from the CPU to the last fence whose feedback has come back, then again at each later submission's feedback (`gpu_lost_release`), so no SyncWait waits for a signal that will not come, and no command allocator is reset before Metal hands its command buffer back;
+  - the front end is told once (`front_gpu_lost`, `dm/host/front.h`). A Mac app leaves full screen, says why in an alert that points to the log and `scripts/bug_report.py`, and quits as ⌘Q does. Without a window, and on the iPhone, the run ends with a FATAL line and an abort.
+
+  A hang or a page fault alone does not stop the game: the GPU recovers from those, and command buffers discarded as innocent victims (`kIOGPUCommandBufferCallbackErrorInnocentVictim`, also a timeout) come back while the game goes on. `DM_TEST_GPU_LOST=<n>` imitates the revoked access from the nth submission on, and `t_gpu_lost` checks the error's shape, the single call, the released waits and the stopped presents.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, v131072) on a Mac ([GitHub issue #1326](https://github.com/seedds/nxnative/issues/1326); its profile is in [pull request #1299](https://github.com/seedds/nxnative/pull/1299)). Its first run hung in full screen and every command buffer after the hang was ignored. Its second run, in a window, recovered from several innocent-victim timeouts, page-faulted at fences 110102 and 110108, and had every command buffer ignored from fence 110114, two frames later.
+- **Open:** the hang and the page faults that made macOS revoke the access.
+- **Not checked:** a real revoked access with the fix; only the imitation (`t_gpu_lost`).
 
 ### A CPU-written window texture resolved where the present is queued
 
@@ -1037,8 +1059,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** the `residency set` line shows `passes ended to land them for a read` in the tens of thousands, every one `refused … earlier submission running`. The slower the GPU, the more passes, and each pass makes it slower: a scene stays at a very low frame rate once it falls in.
 - **Cause:** a partly covered uniform shadow ([Partial-cover uniform shadows keep passes open](#partial-cover-uniform-shadows-keep-passes-open)) takes the rest from memory, which refused it while a running submission could still write those pages. Two kinds of write counted. The inline updates of the frame before: a game that updates a block every frame refused it for as long as that frame ran, though the CPU knows those bytes. And any write of 16 MB or more, which counted as a write anywhere.
-- **Fix:** inline updates of running submissions are remembered by byte, each with its fence, and laid over memory in the shadow (`um_put`, `um_overlay`; `DM_NVN_UBP_RUNNING=0` refuses as before); a slot a running page holds leaves the other page refused as before. A byte counts only while its fence runs, so what the game writes later is not overwritten. Writes of 16 MB or more are kept whole, by range (`gww_put`, 32 of them; beyond that a write anywhere).
+- **Fix:** inline updates of running submissions are remembered by byte, each with its fence, and laid over memory in the shadow (`um_put`, `um_overlay`; `DM_NVN_UBP_RUNNING=0` refuses as before); a slot a running page holds leaves the other page refused as before. A byte counts only while its fence runs, so what the game writes later is not overwritten. The running-write ledger keeps large writes as ranges (`gww_put`).
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink query block is updated at 0x00..0x14 and 0x18..0x70 while the shader reads 0x00..0x70, so one unused word leaves it partly covered, before each of about 150 queries a frame; `7866f36373e7` writes a 56 MB buffer each frame. 90,000 refusals every 300 frames became none. `DM_NVN_UBP_CHECK=1` on the first level: 592,000 shadows equal to the GPU's memory, 0 different.
+- Writes spanning more than 64 pages now remain page-aligned ranges across submissions. Expanding them into page entries can make unrelated uniform pages look busy when two entries hash to the same slot. The ledger retains up to 128 live ranges and falls back to treating excess writes as writes anywhere. In Ocarina of Time 1.1.1 on an M3 Max, about 10,400 uniform shadow refusals per 300 frames became zero.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_ubp_running` and `check_t_sbw` (fails with `DM_NVN_UBP_RUNNING=0`).
 
 ### An unbound uniform slot reads the zero bank
@@ -1105,6 +1128,23 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** every encoder end goes through `m4_end`, which called `gp_end` for any encoder, including the upload, diagnostics and present encoders, which are not profiled. `gp_end` closed whichever main-command-buffer encoder `gp_begin` had last opened and sent its end stamp to the encoder it was given. An upload flush inside a profiled draw pass sent the render encoder's timestamp selector to the upload compute encoder (the abort); where the kinds matched, the pass lost its own end stamp.
 - **Fix:** `gp_begin` records the encoder it stamped, and `gp_end` ignores any other encoder, so the open pass keeps its label until its own end.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) with `DM_NVN_GPUPROF=every:300` on the Mac (issue #531; one run in four, about frame 23,000). `t_gpuprof` ends an upload encoder inside a profiled pass; it runs in CPU CI. Not rerun in the game.
+
+### Failed GPU work named by its command buffer
+
+- **Symptom:** a GPU hang or page fault shows in the log only as `[RED] segment command buffer execution error: Error Domain=MTL4CommandQueueErrorDomain Code=1 "(null)"` with `kIOGPUCommandBufferCallbackErrorHang` (or `…PageFault`) nested in it: no frame, segment, pass or shader, so a hang minutes into a game could not be traced to a shader without a rerun.
+- **Cause:** Metal 4 reports a GPU error only as the error of the commit's feedback; it has no counterpart of Metal 3's encoder execution status. The feedback handlers of the main command buffers kept nothing of what their command buffer held.
+- **Fix:** each main command buffer (a segment, `sub_cut`; the last segment, `mtl_sub_commit`; a count wait, `mdi_wait`) is labelled `f<frame> s<segment> p<first pass>-<last pass>` for Xcode's GPU captures and Instruments, and its entry keeps the same with its fence, its draws and dispatches, and the keys of the game's shaders they ran, each once, the first 32 (`cbn_close`, `cbn_sh` in `nvn_mtl.m`). The entry goes with the command buffer's feedback handler, so a hang reported seconds later, after hundreds more segments, still names it; a ring keeps the last 256 for the ones before it. A command buffer whose error is its own, not an innocent victim's (`kIOGPUCommandBufferCallbackErrorInnocentVictim`), prints a header and then its entry and the three before it, oldest first:
+
+  ```
+  [RED] failed GPU work: main command buffer #2 f7 s1 p2-2 caused a GPU hang; the game's shaders it and the command buffers before it ran, oldest first (v vertex, f fragment, …):
+  [RED]   #1 f7 s0 p1-1 (segment of fence 1): draws 2, dispatches 0; v:a0a0a0a0a0a0a0a1 f:a0a0a0a0a0a0a0a2
+  [RED]   #2 f7 s1 p2-2 (segment of fence 1): draws 1, dispatches 1; c:c0c0c0c0c0c0c0c3 v:b0b0b0b0b0b0b0b1 f:b0b0b0b0b0b0b0b2  <- failed
+  ```
+
+  The header says `caused a GPU hang`, `caused a GPU page fault`, `ran out of GPU memory`, or `was ignored` when macOS revoked the GPU access (then the command buffers before it are the last the GPU ran). An entry is printed once while the ring holds it, an ignored command buffer only the first time (every later one is ignored too), and at most 8 headers a run. Shaders past the first 32 of a command buffer are counted (`+N more`); `DM_NVN_CUT=1` gives one segment per pass. The segment tagging follows the hang log on lunks's branch for [#1326](https://github.com/seedds/nxnative/issues/1326), which named Ocarina of Time's hung task shaders with `DM_NVN_CUT=1`. It is always on: about 2 ns a draw, 10 ns a program's first draw in a command buffer and 180 ns a command buffer for the label and the copies of its entry (M4). `DM_TEST_GPU_HANG=<n>` makes the nth main command buffer report a hang while its work runs; `t_gpu_hang_names` checks with it that the hung segment is named with its shader keys and the one before it, and that innocent victims print nothing, an entry prints once, an ignored command buffer once, and a hang reported after the ring has gone round is still named.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, v131072) on a Mac ([GitHub issue #1326](https://github.com/seedds/nxnative/issues/1326); its profile is in [pull request #1299](https://github.com/seedds/nxnative/pull/1299)): a GPU hang about 7 minutes in, after the pool table had grown, logged only as `kIOGPUCommandBufferCallbackErrorHang`.
+- **Check:** in Ocarina of Time (lunks's pool-table branch with this change, windowed), `DM_TEST_GPU_HANG=8000` named main command buffer #8000 at frame 1155 and listed the three before it with the game's shader keys: one segment with 14 dispatches of 11 compute shaders and a draw.
+- **Not checked:** a real hang or page fault with this change; only the imitation.
 
 ## Conditional rendering and queries
 
@@ -1435,3 +1475,24 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws, the valid rectangle of the presented texture, whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+### Deferred release partition
+
+- **Symptom:** a large resource retirement batch stalls replay in `NSArray` removal, with hundreds of thousands of entries awaiting release.
+- **Cause:** removing one completed reference at a time shifts the still-pending tail repeatedly. A sample during the forest load spent most of its submission time in `defer_drain` and `memmove`.
+- **Fix:** snapshot the completed fence, partition ready and pending references in one walk under the queue lock, and release the ready objects outside it in the original reverse order. `t_deferred_release` checks 100,000 interleaved entries, including retention and release order.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.
+
+### Indirect mesh arguments
+
+- **Symptom:** `nvnCommandBufferDrawMeshTasksIndirect` was unimplemented and its GPU-driven draws were skipped.
+- **Cause:** the indirect buffer carries a count and a first-task index. A CPU read at recording time cannot see the GPU producer, and Metal expects three grid dimensions, without the first-task word.
+- **Fix:** the indirect conversion compute pass produces the Metal grid and a separate first-workgroup value for the task and mesh shaders. Convert after ending a pass that can land earlier writes; tag the conversion with that write epoch. `t_mesh_indirect` writes both a nonzero and a zero-work record on the GPU before replay converts them.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.
+
+### Atomic reinterpretation of RGBA8
+
+- **Symptom:** `image atomics on a texture Metal cannot run them on` when a shader's R32Uint image view is backed by an RGBA8 color texture.
+- **Cause:** Metal rejects shader-atomic usage on RGBA8 storage, even when a view reinterprets the texel as R32Uint. Substituting a sink discards the atomic writes.
+- **Fix:** for a private single-sampled 2D RGBA8 texture, preserve its texels through an RGBA8 view of integer storage made with atomic usage. Bind the integer image from the root backing and retain the color view for other uses. The heap remains resident while its views live. `t_image_usage` verifies that a color clear survives the upgrade and an atomic OR changes the bytes read through the color view.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.
