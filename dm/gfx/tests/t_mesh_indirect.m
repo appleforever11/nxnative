@@ -7,7 +7,32 @@ module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 
+// The deferred encoder must preserve the address and all three dimensions,
+// not only the one-dimensional threadgroup sizes used by the first games.
+@interface MeshRecordSink : NSObject {
+@public uint64_t address; MTLSize objectThreads, meshThreads; unsigned calls;
+}
+@end
+@implementation MeshRecordSink
+- (void)drawMeshThreadgroupsWithIndirectBuffer:(uint64_t)indirect
+    threadsPerObjectThreadgroup:(MTLSize)object
+    threadsPerMeshThreadgroup:(MTLSize)mesh {
+    address = indirect; objectThreads = object; meshThreads = mesh; calls++;
+}
+@end
+
 int main(void) { @autoreleasepool {
+    MeshRecordSink *sink = [MeshRecordSink new];
+    g_rx_enc = sink;
+    DmRecEnc *proxy = [DmRecEnc new];
+    [proxy drawMeshThreadgroupsWithIndirectBuffer:0x1122334455667788ull
+        threadsPerObjectThreadgroup:MTLSizeMake(3, 5, 7)
+        threadsPerMeshThreadgroup:MTLSizeMake(11, 13, 17)];
+    rec_drain();
+    assert(sink->calls == 1 && sink->address == 0x1122334455667788ull);
+    assert(sink->objectThreads.width == 3 && sink->objectThreads.height == 5 && sink->objectThreads.depth == 7);
+    assert(sink->meshThreads.width == 11 && sink->meshThreads.height == 13 && sink->meshThreads.depth == 17);
+    g_rx_enc = nil;
     mtl_init(); size_t bytes = (size_t)getpagesize();
     uint32_t *guest = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(guest != MAP_FAILED); mtl_pool_add(guest, bytes);

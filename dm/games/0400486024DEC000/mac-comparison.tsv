@@ -1,0 +1,23 @@
+# M3 Pro 36 GiB, macOS27.2, update131072,2560x1440. Same manual save and stationary view; handheld, serial encoding, Metal4 on, bundled/user archive off, original alias size.
+# Times are ms; memory MB as logged. Four separate300-frame windows per case; these are not a pooled1200-frame percentile.
+run	frame	frame_p50_ms	frame_p95_ms	frame_max_ms	gpu_p50_ms	gpu_p95_ms	gpu_max_ms
+baseline-noarchive	15600	47.40	59.88	79.78	46.68	58.56	66.92
+baseline-noarchive	15900	47.51	59.70	66.35	47.18	59.11	64.69
+baseline-noarchive	16200	48.07	58.90	64.92	47.27	57.25	64.81
+baseline-noarchive	16500	48.55	60.19	81.50	47.81	59.37	64.59
+community-off	3300	74.11	108.89	166.96	72.26	107.33	165.63
+community-off	3600	74.32	104.54	137.94	72.82	103.16	137.50
+community-off	3900	75.01	96.35	130.64	74.09	95.25	125.28
+community-off	4200	75.78	106.62	137.13	74.36	103.89	136.53
+community-on	2700	46.85	72.93	151.93	46.41	70.34	105.34
+community-on	3000	47.13	73.51	93.12	47.01	72.94	92.79
+community-on	3300	46.83	78.07	88.47	46.56	74.65	87.30
+community-on	3600	46.35	72.09	93.85	46.17	72.38	93.39
+community-off-repeat	4800	46.77	73.15	113.68	45.63	73.52	113.49
+community-off-repeat	5100	45.21	69.78	90.05	44.66	69.01	89.81
+community-off-repeat	5400	45.86	82.48	100.59	45.55	82.74	100.33
+community-off-repeat	5700	46.23	72.45	93.76	45.91	71.56	93.54
+community-on-repeat	3900	47.04	71.04	91.27	46.73	70.38	87.12
+community-on-repeat	4200	47.90	75.98	92.96	47.31	75.64	92.49
+community-on-repeat	4500	47.00	69.46	113.14	46.87	69.40	112.95
+community-on-repeat	4800	47.35	70.88	105.83	46.76	70.16	104.90

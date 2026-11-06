@@ -1,0 +1,47 @@
+{
+  "baseline_chain": "d1f10abd26a7",
+  "candidate_chain": "cc5da3405678",
+  "baseline_total": 42851,
+  "candidate_total": 42854,
+  "baseline_ready": 42823,
+  "candidate_ready": 42853,
+  "newly_failing_previous_successes": [],
+  "previous_failures_now_ready": [
+    "00b0635ae2b9613b",
+    "10a2c776a57f5071",
+    "13002657609092b4",
+    "1f78730053feb036",
+    "3b8ecb1aa4207240",
+    "49d003551e7dcaf1",
+    "5d3a096025e375a1",
+    "604134a5262ff670",
+    "740e2b04db624fb1",
+    "7d1481cf3458b690",
+    "819c33c90234fcb6",
+    "8336f2da0f51938d",
+    "83df46a0b1b379b4",
+    "8692b34b521225be",
+    "99951da6e5cd38f5",
+    "9ecd96cec34c7315",
+    "aaa785ced92a88ef",
+    "adbaa02880733cf0",
+    "c144d8f734fbe228",
+    "c26c20f61455fb9e",
+    "ca03b41694d4c196",
+    "dac121a8c0b3efbd",
+    "de5a4f469cb990b2",
+    "e172bd7ec218ab8e",
+    "e8b64d5ad83c7e22",
+    "ecead5cd0569091f",
+    "fed302d791a4ba43"
+  ],
+  "remaining_failures": [
+    "68bbe98b3bfd9876"
+  ],
+  "added_keys": [
+    "1fdc85178b60f6ce",
+    "92918e9b7e2f89a4",
+    "d17eefaff4f0bc23"
+  ],
+  "removed_keys": []
+}
